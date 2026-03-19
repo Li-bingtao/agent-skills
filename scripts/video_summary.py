@@ -10,6 +10,8 @@ import shutil
 import sys
 import tempfile
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -25,7 +27,13 @@ YOUTUBE_HOSTS = {
 }
 
 DEFAULT_LANGUAGES = ["en", "zh-Hans", "zh-Hant", "zh"]
-DEFAULT_OLLAMA_HOST = "http://127.0.0.1:11434"
+DEFAULT_VISION_HOST = "http://127.0.0.1:11434"
+CHINESE_FIRST_LANGUAGES = ["zh", "zh-Hans", "zh-Hant", "en"]
+CHINESE_FIRST_PLATFORMS = {"bilibili", "xiaohongshu", "douyin"}
+DOUYIN_MOBILE_USER_AGENT = (
+    "Mozilla/5.0 (Linux; Android 10; Mobile) "
+    "AppleWebKit/537.36 Chrome/122.0.0.0 Mobile Safari/537.36"
+)
 
 
 @dataclass
@@ -45,11 +53,11 @@ def configure_stdio() -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Prepare chat-friendly JSON for summarizing a single YouTube video "
+            "Prepare chat-friendly JSON for summarizing a supported online video "
             "without paid APIs."
         )
     )
-    parser.add_argument("url", help="YouTube video URL or bare video id")
+    parser.add_argument("url", help="Supported video URL or bare video id")
     parser.add_argument(
         "--languages",
         nargs="+",
@@ -63,7 +71,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--transcribe-model",
-        default=os.environ.get("YOUTUBE_SUMMARY_TRANSCRIBE_MODEL", "base"),
+        default=(
+            os.environ.get("VIDEO_SUMMARY_TRANSCRIBE_MODEL")
+            or os.environ.get("YOUTUBE_SUMMARY_TRANSCRIBE_MODEL")
+            or "base"
+        ),
         help="faster-whisper model for the transcription fallback.",
     )
     parser.add_argument(
@@ -85,13 +97,27 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--vision-model",
-        default=os.environ.get("YOUTUBE_SUMMARY_VISION_MODEL"),
-        help="Optional local Ollama vision model name for frame descriptions.",
+        default=(
+            os.environ.get("VIDEO_SUMMARY_VISION_MODEL")
+            or os.environ.get("YOUTUBE_SUMMARY_VISION_MODEL")
+        ),
+        help="Optional vision-capable model identifier for automatic frame descriptions.",
     )
     parser.add_argument(
+        "--vision-host",
         "--ollama-host",
-        default=os.environ.get("YOUTUBE_SUMMARY_OLLAMA_HOST", DEFAULT_OLLAMA_HOST),
-        help="Ollama host for frame description requests.",
+        dest="vision_host",
+        default=(
+            os.environ.get("VIDEO_SUMMARY_VISION_HOST")
+            or os.environ.get("YOUTUBE_SUMMARY_VISION_HOST")
+            or os.environ.get("VIDEO_SUMMARY_OLLAMA_HOST")
+            or os.environ.get("YOUTUBE_SUMMARY_OLLAMA_HOST")
+            or DEFAULT_VISION_HOST
+        ),
+        help=(
+            "HTTP endpoint for automatic frame description requests. "
+            "The bundled implementation expects an Ollama-compatible /api/chat endpoint."
+        ),
     )
     parser.add_argument(
         "--keep-artifacts",
@@ -117,7 +143,43 @@ def require_module(module_name: str, package_name: str) -> Any:
     return module
 
 
-def extract_video_id(url_or_id: str) -> str:
+def detect_platform(url_or_id: str) -> str:
+    raw = url_or_id.strip()
+    if re.fullmatch(r"[\w-]{11}", raw):
+        return "youtube"
+
+    parsed = urlparse(raw)
+    host = parsed.netloc.lower()
+    if not host:
+        raise ValueError("Input is not a recognized video URL or supported bare video id.")
+
+    if host in YOUTUBE_HOSTS:
+        return "youtube"
+
+    if host.endswith("bilibili.com") or host == "b23.tv":
+        return "bilibili"
+
+    if host.endswith("xiaohongshu.com") or host == "xhslink.com":
+        return "xiaohongshu"
+
+    if host.endswith("douyin.com") or host.endswith("iesdouyin.com"):
+        return "douyin"
+
+    if host.endswith("x.com") or host.endswith("twitter.com") or host == "t.co":
+        return "x"
+
+    return "generic"
+
+
+def effective_languages(selected: list[str], platform: str) -> list[str]:
+    if selected != DEFAULT_LANGUAGES:
+        return selected
+    if platform in CHINESE_FIRST_PLATFORMS:
+        return CHINESE_FIRST_LANGUAGES
+    return selected
+
+
+def extract_youtube_video_id(url_or_id: str) -> str:
     raw = url_or_id.strip()
     if re.fullmatch(r"[\w-]{11}", raw):
         return raw
@@ -321,23 +383,259 @@ def build_ydl_opts() -> dict[str, Any]:
     }
 
 
+def fetch_webpage_text(
+    url: str,
+    *,
+    referer: str | None = None,
+    user_agent: str | None = None,
+) -> str:
+    headers = {"User-Agent": user_agent or "Mozilla/5.0"}
+    if referer:
+        headers["Referer"] = referer
+    request = Request(url, headers=headers)
+    with urlopen(request, timeout=30) as response:
+        return response.read().decode("utf-8", "ignore")
+
+
+def decode_escaped_json_string(raw: str | None) -> str | None:
+    if raw is None:
+        return None
+    try:
+        return json.loads(f'"{raw}"')
+    except json.JSONDecodeError:
+        return raw.replace("\\/", "/")
+
+
+def extract_xiaohongshu_note_id(url: str) -> str | None:
+    match = re.search(r"/explore/([0-9a-zA-Z]+)", urlparse(url).path)
+    if match:
+        return match.group(1)
+    return None
+
+
+def build_xiaohongshu_context(page_html: str, note_id: str | None) -> str:
+    if note_id:
+        anchor = page_html.find(f'"noteId":"{note_id}"')
+        if anchor != -1:
+            start = max(0, anchor - 6000)
+            end = min(len(page_html), anchor + 60000)
+            return page_html[start:end]
+    return page_html
+
+
+def extract_douyin_aweme_id(url: str) -> str | None:
+    path = urlparse(url).path
+    match = re.search(r"/(?:share/)?video/(\d+)", path)
+    if match:
+        return match.group(1)
+    return None
+
+
+def build_douyin_context(page_html: str, aweme_id: str | None) -> str:
+    if aweme_id:
+        anchor = page_html.find(f'"aweme_id":"{aweme_id}"')
+        if anchor == -1:
+            anchor = page_html.find(f'"itemId":"{aweme_id}"')
+        if anchor != -1:
+            start = max(0, anchor - 6000)
+            end = min(len(page_html), anchor + 60000)
+            return page_html[start:end]
+    return page_html
+
+
+def extract_first_match(text: str, pattern: str) -> str | None:
+    match = re.search(pattern, text, re.DOTALL)
+    if not match:
+        return None
+    return decode_escaped_json_string(match.group(1))
+
+
+@lru_cache(maxsize=16)
+def fetch_xiaohongshu_note_data(url: str) -> dict[str, Any]:
+    page_html = fetch_webpage_text(url)
+    note_id = extract_xiaohongshu_note_id(url)
+    context = build_xiaohongshu_context(page_html, note_id)
+
+    title = extract_first_match(context, r'"displayTitle":"((?:[^"\\]|\\.)*)"')
+    uploader = extract_first_match(context, r'"nickname":"((?:[^"\\]|\\.)*)"')
+    description = clean_text(extract_first_match(context, r'"desc":"((?:[^"\\]|\\.)*)"') or "")
+    thumbnail = extract_first_match(
+        context,
+        r'"cover":\{.*?"urlDefault":"((?:[^"\\]|\\.)*)"',
+    ) or extract_first_match(
+        context,
+        r'"imageList":\[\{.*?"urlDefault":"((?:[^"\\]|\\.)*)"',
+    )
+    stream_url = extract_first_match(context, r'"masterUrl":"((?:[^"\\]|\\.)*)"')
+    duration_raw = extract_first_match(context, r'"capa":\{"duration":(\d+)\}')
+    if duration_raw is None:
+        duration_raw = extract_first_match(context, r'"video":\{.*?"duration":(\d+)')
+    duration = float(duration_raw) if duration_raw else None
+    time_raw = extract_first_match(context, r'"time":(\d{13})')
+    upload_date = None
+    if time_raw:
+        upload_date = datetime.fromtimestamp(
+            int(time_raw) / 1000,
+            tz=timezone.utc,
+        ).strftime("%Y%m%d")
+    tags = [
+        clean_text(tag)
+        for tag in re.findall(r'"name":"((?:[^"\\]|\\.)*)","type":"topic"', context)
+    ]
+    tags = [tag for tag in tags if tag]
+
+    if not note_id and not stream_url and not title:
+        raise RuntimeError("Could not extract Xiaohongshu note metadata from the share page.")
+
+    return {
+        "id": note_id,
+        "title": title or note_id or url,
+        "uploader": uploader,
+        "channel": None,
+        "duration": duration,
+        "description": description or None,
+        "webpage_url": url,
+        "upload_date": upload_date,
+        "chapters": [],
+        "thumbnail": thumbnail,
+        "tags": tags,
+        "stream_url": stream_url,
+    }
+
+
+@lru_cache(maxsize=16)
+def fetch_douyin_note_data(url: str) -> dict[str, Any]:
+    page_html = fetch_webpage_text(url, user_agent=DOUYIN_MOBILE_USER_AGENT)
+    aweme_id = extract_douyin_aweme_id(url)
+    context = build_douyin_context(page_html, aweme_id)
+    if not aweme_id:
+        aweme_id = extract_first_match(context, r'"aweme_id":"(\d+)"') or extract_first_match(
+            context,
+            r'"itemId":"(\d+)"',
+        )
+
+    description = clean_text(extract_first_match(context, r'"desc":"((?:[^"\\]|\\.)*)"') or "")
+    uploader = extract_first_match(context, r'"nickname":"((?:[^"\\]|\\.)*)"')
+    title = description or extract_first_match(
+        page_html,
+        r'<meta[^>]+name="description"[^>]+content="((?:[^"\\]|\\.)*)"',
+    )
+    cover = extract_first_match(
+        context,
+        r'"cover":\{.*?"url_list":\["((?:[^"\\]|\\.)*)"',
+    )
+    stream_url = extract_first_match(
+        context,
+        r'"play_addr":\{.*?"url_list":\["((?:[^"\\]|\\.)*)"',
+    )
+    create_time = extract_first_match(context, r'"create_time":(\d{10})')
+    duration_raw = extract_first_match(context, r'"duration":(\d{2,6})')
+    duration = None
+    if duration_raw:
+        duration = float(duration_raw)
+        if duration > 1000:
+            duration /= 1000.0
+    upload_date = None
+    if create_time:
+        upload_date = datetime.fromtimestamp(
+            int(create_time),
+            tz=timezone.utc,
+        ).strftime("%Y%m%d")
+    tags = [clean_text(tag) for tag in re.findall(r"#([^\s#]+)", description)]
+    tags = [tag for tag in tags if tag]
+
+    if not aweme_id and not stream_url and not title:
+        raise RuntimeError("Could not extract Douyin metadata from the share page.")
+
+    return {
+        "id": aweme_id,
+        "title": title or aweme_id or url,
+        "uploader": uploader,
+        "channel": None,
+        "duration": duration,
+        "description": description or None,
+        "webpage_url": url,
+        "upload_date": upload_date,
+        "chapters": [],
+        "thumbnail": cover,
+        "tags": tags,
+        "stream_url": stream_url,
+    }
+
+
+def download_direct_media(
+    url: str,
+    destination: Path,
+    *,
+    referer: str | None = None,
+    user_agent: str | None = None,
+) -> Path:
+    headers = {"User-Agent": user_agent or "Mozilla/5.0"}
+    if referer:
+        headers["Referer"] = referer
+    request = Request(url, headers=headers)
+    with urlopen(request, timeout=60) as response, destination.open("wb") as handle:
+        shutil.copyfileobj(response, handle)
+    return destination
+
+
 def collect_metadata(url: str) -> dict[str, Any]:
     yt_dlp = require_module("yt_dlp", "yt-dlp")
-    with yt_dlp.YoutubeDL({**build_ydl_opts(), "skip_download": True}) as ydl:
-        info = ydl.extract_info(url, download=False)
-    return {
-        "id": info.get("id"),
-        "title": info.get("title"),
-        "uploader": info.get("uploader"),
-        "channel": info.get("channel"),
-        "duration": info.get("duration"),
-        "description": info.get("description"),
-        "webpage_url": info.get("webpage_url") or url,
-        "upload_date": info.get("upload_date"),
-        "chapters": info.get("chapters") or [],
-        "thumbnail": info.get("thumbnail"),
-        "tags": info.get("tags") or [],
-    }
+    try:
+        with yt_dlp.YoutubeDL({**build_ydl_opts(), "skip_download": True}) as ydl:
+            info = ydl.extract_info(url, download=False)
+        return {
+            "id": info.get("id"),
+            "title": info.get("title"),
+            "uploader": info.get("uploader"),
+            "channel": info.get("channel"),
+            "duration": info.get("duration"),
+            "description": info.get("description"),
+            "webpage_url": info.get("webpage_url") or url,
+            "upload_date": info.get("upload_date"),
+            "chapters": info.get("chapters") or [],
+            "thumbnail": info.get("thumbnail"),
+            "tags": info.get("tags") or [],
+        }
+    except Exception:
+        platform = detect_platform(url)
+        if platform == "xiaohongshu":
+            note = fetch_xiaohongshu_note_data(url)
+            return {
+                key: note.get(key)
+                for key in [
+                    "id",
+                    "title",
+                    "uploader",
+                    "channel",
+                    "duration",
+                    "description",
+                    "webpage_url",
+                    "upload_date",
+                    "chapters",
+                    "thumbnail",
+                    "tags",
+                ]
+            }
+        if platform == "douyin":
+            note = fetch_douyin_note_data(url)
+            return {
+                key: note.get(key)
+                for key in [
+                    "id",
+                    "title",
+                    "uploader",
+                    "channel",
+                    "duration",
+                    "description",
+                    "webpage_url",
+                    "upload_date",
+                    "chapters",
+                    "thumbnail",
+                    "tags",
+                ]
+            }
+        raise
 
 
 def fetch_with_transcript_api(
@@ -467,9 +765,30 @@ def download_audio(url: str, media_dir: Path) -> Path:
         "format": "bestaudio/best",
         "outtmpl": str(media_dir / "audio.%(ext)s"),
     }
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        ydl.download([url])
-    return find_downloaded_media(media_dir, "audio.")
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            ydl.download([url])
+        return find_downloaded_media(media_dir, "audio.")
+    except Exception:
+        platform = detect_platform(url)
+        if platform == "xiaohongshu":
+            note = fetch_xiaohongshu_note_data(url)
+            stream_url = note.get("stream_url")
+            if not stream_url:
+                raise RuntimeError("Xiaohongshu fallback could not find a direct media URL.")
+            return download_direct_media(stream_url, media_dir / "audio.mp4", referer=url)
+        if platform != "douyin":
+            raise
+        note = fetch_douyin_note_data(url)
+        stream_url = note.get("stream_url")
+        if not stream_url:
+            raise RuntimeError("Douyin fallback could not find a direct media URL.")
+        return download_direct_media(
+            stream_url,
+            media_dir / "audio.mp4",
+            referer=url,
+            user_agent=DOUYIN_MOBILE_USER_AGENT,
+        )
 
 
 def transcribe_audio(
@@ -513,9 +832,30 @@ def download_video(url: str, media_dir: Path) -> Path:
         "format": "best[ext=mp4][height<=720]/best[height<=720]/best[ext=mp4]/best",
         "outtmpl": str(media_dir / "video.%(ext)s"),
     }
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        ydl.download([url])
-    return find_downloaded_media(media_dir, "video.")
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            ydl.download([url])
+        return find_downloaded_media(media_dir, "video.")
+    except Exception:
+        platform = detect_platform(url)
+        if platform == "xiaohongshu":
+            note = fetch_xiaohongshu_note_data(url)
+            stream_url = note.get("stream_url")
+            if not stream_url:
+                raise RuntimeError("Xiaohongshu fallback could not find a direct video URL.")
+            return download_direct_media(stream_url, media_dir / "video.mp4", referer=url)
+        if platform != "douyin":
+            raise
+        note = fetch_douyin_note_data(url)
+        stream_url = note.get("stream_url")
+        if not stream_url:
+            raise RuntimeError("Douyin fallback could not find a direct video URL.")
+        return download_direct_media(
+            stream_url,
+            media_dir / "video.mp4",
+            referer=url,
+            user_agent=DOUYIN_MOBILE_USER_AGENT,
+        )
 
 
 def choose_frame_targets(duration: float | None, frame_count: int) -> list[int]:
@@ -573,15 +913,15 @@ def extract_representative_frames(
     return captured
 
 
-def describe_frame_with_ollama(
+def describe_frame_with_vision_endpoint(
     image_path: Path,
     model: str,
-    ollama_host: str,
+    vision_host: str,
     timestamp: str,
 ) -> str:
     encoded = base64.b64encode(image_path.read_bytes()).decode("utf-8")
     prompt = (
-        f"This frame comes from a YouTube video at {timestamp}. "
+        f"This frame comes from a video at {timestamp}. "
         "Describe only the visual content that matters for understanding the video. "
         "Mention visible text, slides, UI, diagrams, people, actions, or scene changes. "
         "Keep it to at most two concise sentences."
@@ -598,7 +938,7 @@ def describe_frame_with_ollama(
         ],
     }
     request = Request(
-        url=f"{ollama_host.rstrip('/')}/api/chat",
+        url=f"{vision_host.rstrip('/')}/api/chat",
         data=json.dumps(payload).encode("utf-8"),
         headers={"Content-Type": "application/json"},
         method="POST",
@@ -608,7 +948,7 @@ def describe_frame_with_ollama(
     message = body.get("message") or {}
     content = clean_text(str(message.get("content", "")))
     if not content:
-        raise RuntimeError(f"Ollama returned an empty description for {image_path.name}.")
+        raise RuntimeError(f"Vision endpoint returned an empty description for {image_path.name}.")
     return content
 
 
@@ -704,13 +1044,15 @@ def main() -> int:
     work_dir: Path | None = None
 
     try:
-        video_id = extract_video_id(args.url)
+        platform = detect_platform(args.url)
+        languages = effective_languages(args.languages, platform)
+        video_id = extract_youtube_video_id(args.url) if platform == "youtube" else None
         try:
             metadata = collect_metadata(args.url)
         except Exception:
             metadata = {
-                "id": video_id,
-                "title": video_id,
+                "id": video_id or args.url,
+                "title": video_id or args.url,
                 "webpage_url": args.url,
                 "duration": None,
                 "description": None,
@@ -722,7 +1064,7 @@ def main() -> int:
             work_dir = Path(args.work_dir).resolve()
             work_dir.mkdir(parents=True, exist_ok=True)
         else:
-            work_dir = Path(tempfile.mkdtemp(prefix="youtube-summary-"))
+            work_dir = Path(tempfile.mkdtemp(prefix="video-summary-"))
 
         subtitles_dir = work_dir / "subtitles"
         media_dir = work_dir / "media"
@@ -730,7 +1072,8 @@ def main() -> int:
         subtitles_dir.mkdir(parents=True, exist_ok=True)
         media_dir.mkdir(parents=True, exist_ok=True)
 
-        methods = [args.force_method] if args.force_method else ["api", "subs", "transcribe"]
+        default_methods = ["api", "subs", "transcribe"] if platform == "youtube" else ["subs", "transcribe"]
+        methods = [args.force_method] if args.force_method else default_methods
         segments: list[Segment] = []
         method_used = ""
         method_details: dict[str, Any] = {}
@@ -739,19 +1082,21 @@ def main() -> int:
         for method in methods:
             try:
                 if method == "api":
-                    segments, method_details = fetch_with_transcript_api(video_id, args.languages)
+                    if platform != "youtube" or not video_id:
+                        raise RuntimeError("Transcript API fallback is only implemented for YouTube.")
+                    segments, method_details = fetch_with_transcript_api(video_id, languages)
                 elif method == "subs":
                     segments, method_details = fetch_with_ytdlp_subtitles(
                         args.url,
                         subtitles_dir,
-                        args.languages,
+                        languages,
                     )
                 elif method == "transcribe":
                     audio_path = download_audio(args.url, media_dir)
                     segments, method_details = transcribe_audio(
                         audio_path,
                         args.transcribe_model,
-                        language_hint_from_preferences(args.languages),
+                        language_hint_from_preferences(languages),
                     )
                     method_details["audio_file"] = str(audio_path)
                 else:
@@ -788,10 +1133,10 @@ def main() -> int:
                 visual_frames = extract_representative_frames(video_path, frames_dir, frame_targets)
                 if args.vision_model:
                     for frame in visual_frames:
-                        description = describe_frame_with_ollama(
+                        description = describe_frame_with_vision_endpoint(
                             Path(frame["path"]),
                             args.vision_model,
-                            args.ollama_host,
+                            args.vision_host,
                             frame["timestamp"],
                         )
                         frame["description"] = description
@@ -809,7 +1154,7 @@ def main() -> int:
         payload = build_output_payload(
             metadata=metadata,
             method_used=method_used,
-            method_details=method_details,
+            method_details={"platform": platform, **method_details},
             attempts=attempts,
             segments=segments,
             chunk_chars=args.chunk_chars,

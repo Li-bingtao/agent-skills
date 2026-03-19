@@ -1,0 +1,4 @@
+interface:
+  display_name: "Video Summary"
+  short_description: "Summarize supported online videos locally; current implementation supports YouTube, Bilibili, Xiaohongshu, Douyin, and X."
+  default_prompt: "Use $video-summary to extract a supported video URL locally, then summarize it in chat."

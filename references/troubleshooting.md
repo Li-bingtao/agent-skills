@@ -8,6 +8,12 @@
   try `--force-method transcribe`.
 - Restricted or age-gated videos:
   this project targets public videos and does not implement a browser-cookie workflow.
+- Xiaohongshu:
+  some posts fail in `yt-dlp` subtitle or media extraction; the current script includes an HTML fallback for share pages.
+- Douyin:
+  subtitles often require fresh cookies, but the current script can still fall back to share-page parsing and local transcription for many public posts.
+- X:
+  subtitle availability is uncommon; expect the transcription fallback to be used more often.
 
 ## Local transcription
 
@@ -19,8 +25,12 @@
 ## Visual pass
 
 - `--include-frames` downloads the video temporarily.
-- If you want auto-cleanup and still need visual understanding, provide a local Ollama vision model with `--vision-model` or `YOUTUBE_SUMMARY_VISION_MODEL`.
-- If Ollama is not reachable, verify `YOUTUBE_SUMMARY_OLLAMA_HOST` or start Ollama on `http://127.0.0.1:11434`.
+- A vision-capable model is optional:
+  transcript-first summaries do not require one.
+- If you want auto-cleanup and still need visual understanding, configure `--vision-model` or `VIDEO_SUMMARY_VISION_MODEL`.
+- If the automatic frame-description endpoint is not reachable, verify `--vision-host` or `VIDEO_SUMMARY_VISION_HOST`.
+- The bundled client currently expects an Ollama-compatible `/api/chat` endpoint.
+- The vision model can be different from your main chat model.
 
 ## Temp files
 
