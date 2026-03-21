@@ -1,6 +1,7 @@
 ---
 name: video-summary
 description: Summarize supported online videos locally without paid APIs. The current implementation supports YouTube, Bilibili, Xiaohongshu, Douyin, and X, with a transcript-first fallback chain and an optional vision-assisted pass.
+license: MIT
 user-invocable: true
 metadata: {"openclaw":{"requires":{"anyBins":["uv","python","python3","py"]}}}
 ---

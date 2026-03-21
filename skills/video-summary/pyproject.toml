@@ -1,7 +1,7 @@
 [project]
-name = "openclaw-video-summary"
-version = "0.2.0"
-description = "Local video summarization helper and skill for OpenClaw or any shell-capable agent, without paid APIs."
+name = "agent-video-summary"
+version = "0.3.0"
+description = "Local multi-platform video summarization skill for shell-capable agents, without paid APIs."
 requires-python = ">=3.10"
 dependencies = [
   "av>=14.0.0",
