@@ -25,9 +25,63 @@ This skill is chat-first:
 - temporary files are internal and auto-cleaned by default
 - do not create Obsidian notes or other persistent documents unless the user explicitly asks
 
+## Setup and validation
+
+Required:
+
+- Python 3.10+
+- Python packages from [`pyproject.toml`](pyproject.toml):
+  `av`, `faster-whisper`, `Pillow`, `yt-dlp`, `youtube-transcript-api`
+
+Optional but recommended:
+
+- `uv` for one-command dependency setup
+- an image-capable model endpoint only if you want the visual pass to produce automatic frame descriptions
+
+For first-time setup, prefer:
+
+```bash
+python "{baseDir}/scripts/bootstrap.py"
+```
+
+Convenience wrappers are also included:
+
+```bash
+sh "{baseDir}/scripts/bootstrap.sh"
+```
+
+```powershell
+powershell -ExecutionPolicy Bypass -File "{baseDir}/scripts/bootstrap.ps1"
+```
+
+To inspect the environment without changing anything:
+
+```bash
+python "{baseDir}/scripts/check_env.py"
+```
+
+To install dependencies without the full bootstrap flow:
+
+```bash
+python "{baseDir}/scripts/install_deps.py"
+```
+
+Minimal validation commands:
+
+```bash
+python "{baseDir}/scripts/check_env.py"
+python "{baseDir}/scripts/video_summary.py" --help
+```
+
+End-to-end validation needs a real public video URL:
+
+```bash
+python "{baseDir}/scripts/video_summary.py" "<supported-video-url>"
+```
+
 ## Preferred runner
 
-If `uv` exists, prefer:
+Once setup has passed, if `uv` exists, prefer:
 
 ```bash
 uv run --project "{baseDir}" "{baseDir}/scripts/video_summary.py" "<video-url>"
@@ -41,13 +95,14 @@ python "{baseDir}/scripts/video_summary.py" "<video-url>"
 
 ## Workflow
 
-1. Decide whether transcript-only is enough.
-2. If the video is lecture-heavy, interview-heavy, podcast-like, or otherwise speech-dominant, start with text-only.
-3. Run the helper script and read the JSON it prints to stdout.
-4. Summarize from `transcript.text` or `transcript.chunks`.
-5. Mention which extraction path succeeded: `api`, `subs`, or `transcribe`.
-6. If the script reports `heuristics.visual_pass_recommended = true`, use that as a signal that the transcript is sparse and visuals may matter.
-7. Before replying, run a final text review for length, clarity, evidence, and policy compliance.
+1. On first use, or after environment-related failures, run `scripts/bootstrap.py` or `scripts/check_env.py`.
+2. Decide whether transcript-only is enough.
+3. If the video is lecture-heavy, interview-heavy, podcast-like, or otherwise speech-dominant, start with text-only.
+4. Run the helper script and read the JSON it prints to stdout.
+5. Summarize from `transcript.text` or `transcript.chunks`.
+6. Mention which extraction path succeeded: `api`, `subs`, or `transcribe`.
+7. If the script reports `heuristics.visual_pass_recommended = true`, use that as a signal that the transcript is sparse and visuals may matter.
+8. Before replying, run a final text review for length, clarity, evidence, and policy compliance.
 
 ## Self-Extension
 
@@ -125,6 +180,6 @@ Use those fields directly in your response. Do not dump the raw JSON back to the
   end with one short follow-up asking whether they want a more detailed version.
 - Run the final response through the checklist in [references/final_review.md](references/final_review.md) before sending it.
 
-Read [references/troubleshooting.md](references/troubleshooting.md) only when extraction or vision steps fail.
+Read [references/troubleshooting.md](references/troubleshooting.md) when setup, extraction, or vision steps fail.
 Read [references/platform_harness.md](references/platform_harness.md) only when you need to extend support to a new platform.
 Read [references/final_review.md](references/final_review.md) only when drafting the final user-facing answer.

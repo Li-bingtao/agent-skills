@@ -30,6 +30,7 @@ DEFAULT_LANGUAGES = ["en", "zh-Hans", "zh-Hant", "zh"]
 DEFAULT_VISION_HOST = "http://127.0.0.1:11434"
 CHINESE_FIRST_LANGUAGES = ["zh", "zh-Hans", "zh-Hant", "en"]
 CHINESE_FIRST_PLATFORMS = {"bilibili", "xiaohongshu", "douyin"}
+SCRIPT_DIR = Path(__file__).resolve().parent
 DOUYIN_MOBILE_USER_AGENT = (
     "Mozilla/5.0 (Linux; Android 10; Mobile) "
     "AppleWebKit/537.36 Chrome/122.0.0.0 Mobile Safari/537.36"
@@ -135,10 +136,11 @@ def require_module(module_name: str, package_name: str) -> Any:
     try:
         module = __import__(module_name, fromlist=["*"])
     except ImportError as exc:
+        bootstrap_cmd = f'"{sys.executable}" "{SCRIPT_DIR / "bootstrap.py"}"'
+        install_cmd = f'"{sys.executable}" "{SCRIPT_DIR / "install_deps.py"}"'
         raise RuntimeError(
-            f"Missing dependency '{package_name}'. Install it with "
-            f"'uv sync' in the project root, or "
-            f"'python -m pip install {package_name}'."
+            f"Missing dependency '{package_name}'. Run {bootstrap_cmd} for guided setup, "
+            f"or {install_cmd} to install dependencies directly."
         ) from exc
     return module
 

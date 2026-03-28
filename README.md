@@ -82,7 +82,19 @@ Place [`skills/video-summary`](./skills/video-summary) in:
 
 ### Standalone use
 
-Run the helper directly from this repository:
+For first-time setup:
+
+```bash
+python ./skills/video-summary/scripts/bootstrap.py
+```
+
+To inspect readiness without changing the environment:
+
+```bash
+python ./skills/video-summary/scripts/check_env.py
+```
+
+Then run the helper directly from this repository:
 
 ```bash
 uv run --project ./skills/video-summary ./skills/video-summary/scripts/video_summary.py "<video-url>"
