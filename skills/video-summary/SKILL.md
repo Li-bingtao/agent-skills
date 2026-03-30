@@ -36,7 +36,7 @@ Required:
 Optional but recommended:
 
 - `uv` for one-command dependency setup
-- an image-capable model endpoint only if you want the visual pass to produce automatic frame descriptions
+- an OpenAI-compatible image-capable model endpoint only if you want the visual pass to produce automatic frame descriptions
 
 For first-time setup, prefer:
 
@@ -132,7 +132,7 @@ Read [references/platform_harness.md](references/platform_harness.md) when you n
 - Unless the user explicitly asks to keep downloaded files for inspection or debugging:
   do not use `--keep-artifacts`.
 - If a vision-capable model endpoint is not configured:
-  say that transcript-only is available now, and visual understanding needs `VIDEO_SUMMARY_VISION_MODEL` or `--vision-model`.
+  say that transcript-only is available now, and automatic visual understanding needs both `VIDEO_SUMMARY_VISION_MODEL` and `VIDEO_SUMMARY_VISION_BASE_URL`, or the matching CLI flags.
 - Do not ask whether to delete the video cache when `--keep-artifacts` is not used:
   the script auto-cleans temp files.
 - Only ask about cleanup if you intentionally run with `--keep-artifacts`.
@@ -150,8 +150,15 @@ uv run --project "{baseDir}" "{baseDir}/scripts/video_summary.py" "<video-url>" 
 If you need to override the vision settings explicitly:
 
 ```bash
-uv run --project "{baseDir}" "{baseDir}/scripts/video_summary.py" "<video-url>" --include-frames --vision-model gemma3 --vision-host http://127.0.0.1:11434
+uv run --project "{baseDir}" "{baseDir}/scripts/video_summary.py" "<video-url>" --include-frames --vision-model your-vision-model --vision-base-url https://your-vision-endpoint.example/v1
 ```
+
+Keep the vision integration generic:
+
+- do not assume or require any specific inference framework
+- local OpenAI-compatible servers are acceptable
+- hosted APIs with API keys are acceptable
+- if automatic frame descriptions are unavailable, transcript-only mode still works
 
 ## Output fields
 

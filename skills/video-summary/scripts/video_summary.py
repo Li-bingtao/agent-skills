@@ -27,7 +27,6 @@ YOUTUBE_HOSTS = {
 }
 
 DEFAULT_LANGUAGES = ["en", "zh-Hans", "zh-Hant", "zh"]
-DEFAULT_VISION_HOST = "http://127.0.0.1:11434"
 CHINESE_FIRST_LANGUAGES = ["zh", "zh-Hans", "zh-Hant", "en"]
 CHINESE_FIRST_PLATFORMS = {"bilibili", "xiaohongshu", "douyin"}
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -105,19 +104,28 @@ def parse_args() -> argparse.Namespace:
         help="Optional vision-capable model identifier for automatic frame descriptions.",
     )
     parser.add_argument(
-        "--vision-host",
-        "--ollama-host",
-        dest="vision_host",
+        "--vision-base-url",
+        dest="vision_base_url",
         default=(
-            os.environ.get("VIDEO_SUMMARY_VISION_HOST")
+            os.environ.get("VIDEO_SUMMARY_VISION_BASE_URL")
+            or os.environ.get("YOUTUBE_SUMMARY_VISION_BASE_URL")
+            or os.environ.get("VIDEO_SUMMARY_VISION_HOST")
             or os.environ.get("YOUTUBE_SUMMARY_VISION_HOST")
-            or os.environ.get("VIDEO_SUMMARY_OLLAMA_HOST")
-            or os.environ.get("YOUTUBE_SUMMARY_OLLAMA_HOST")
-            or DEFAULT_VISION_HOST
         ),
         help=(
-            "HTTP endpoint for automatic frame description requests. "
-            "The bundled implementation expects an Ollama-compatible /api/chat endpoint."
+            "Base URL for an OpenAI-compatible vision API, for example "
+            "http://127.0.0.1:1234/v1 or https://api.openai.com/v1."
+        ),
+    )
+    parser.add_argument(
+        "--vision-api-key",
+        default=(
+            os.environ.get("VIDEO_SUMMARY_VISION_API_KEY")
+            or os.environ.get("YOUTUBE_SUMMARY_VISION_API_KEY")
+        ),
+        help=(
+            "Optional API key for the vision API. "
+            "Leave unset for local endpoints that do not require authentication."
         ),
     )
     parser.add_argument(
@@ -915,10 +923,33 @@ def extract_representative_frames(
     return captured
 
 
-def describe_frame_with_vision_endpoint(
+def extract_vision_text(content: Any) -> str:
+    if isinstance(content, str):
+        return clean_text(content)
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, dict):
+                if item.get("type") == "text" and item.get("text"):
+                    parts.append(str(item["text"]))
+                elif item.get("type") == "output_text" and item.get("text"):
+                    parts.append(str(item["text"]))
+        return clean_text(" ".join(parts))
+    return ""
+
+
+def build_vision_api_url(vision_base_url: str) -> str:
+    base = vision_base_url.rstrip("/")
+    if base.endswith("/chat/completions"):
+        return base
+    return f"{base}/chat/completions"
+
+
+def describe_frame_with_vision_api(
     image_path: Path,
     model: str,
-    vision_host: str,
+    vision_base_url: str,
+    vision_api_key: str | None,
     timestamp: str,
 ) -> str:
     encoded = base64.b64encode(image_path.read_bytes()).decode("utf-8")
@@ -930,25 +961,35 @@ def describe_frame_with_vision_endpoint(
     )
     payload = {
         "model": model,
-        "stream": False,
         "messages": [
             {
                 "role": "user",
-                "content": prompt,
-                "images": [encoded],
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{encoded}"},
+                    },
+                ],
             }
         ],
+        "max_tokens": 180,
     }
+    headers = {"Content-Type": "application/json"}
+    if vision_api_key:
+        headers["Authorization"] = f"Bearer {vision_api_key}"
     request = Request(
-        url=f"{vision_host.rstrip('/')}/api/chat",
+        url=build_vision_api_url(vision_base_url),
         data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
+        headers=headers,
         method="POST",
     )
     with urlopen(request, timeout=180) as response:
         body = json.loads(response.read().decode("utf-8"))
-    message = body.get("message") or {}
-    content = clean_text(str(message.get("content", "")))
+    choices = body.get("choices") or []
+    first_choice = choices[0] if choices else {}
+    message = first_choice.get("message") or {}
+    content = extract_vision_text(message.get("content"))
     if not content:
         raise RuntimeError(f"Vision endpoint returned an empty description for {image_path.name}.")
     return content
@@ -1134,11 +1175,17 @@ def main() -> int:
                 )
                 visual_frames = extract_representative_frames(video_path, frames_dir, frame_targets)
                 if args.vision_model:
+                    if not args.vision_base_url:
+                        raise RuntimeError(
+                            "A vision base URL is required for automatic frame descriptions. "
+                            "Set --vision-base-url or VIDEO_SUMMARY_VISION_BASE_URL."
+                        )
                     for frame in visual_frames:
-                        description = describe_frame_with_vision_endpoint(
+                        description = describe_frame_with_vision_api(
                             Path(frame["path"]),
                             args.vision_model,
-                            args.vision_host,
+                            args.vision_base_url,
+                            args.vision_api_key,
                             frame["timestamp"],
                         )
                         frame["description"] = description

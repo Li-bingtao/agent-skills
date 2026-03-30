@@ -100,7 +100,7 @@ Then run the helper directly from this repository:
 uv run --project ./skills/video-summary ./skills/video-summary/scripts/video_summary.py "<video-url>"
 ```
 
-Transcript-only runs need Python plus the listed dependencies. A visual pass additionally needs a configured image-capable model endpoint that matches the skill's `--vision-model` and `--vision-host` settings.
+Transcript-only runs need Python plus the listed dependencies. A visual pass additionally needs a configured image-capable model endpoint that matches the skill's `--vision-model`, `--vision-base-url`, and optional `--vision-api-key` settings.
 
 ## Development and validation
 

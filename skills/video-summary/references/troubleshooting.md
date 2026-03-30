@@ -55,11 +55,12 @@ If `uv` is unavailable, it falls back to `python -m pip install ...`.
 - A vision-capable model is optional:
   transcript-first summaries do not require one.
 - If you want auto-cleanup and still need visual understanding, configure `--vision-model` or `VIDEO_SUMMARY_VISION_MODEL`.
-- If the automatic frame-description endpoint is not reachable, verify `--vision-host` or `VIDEO_SUMMARY_VISION_HOST`.
-- The bundled client currently expects an Ollama-compatible `/api/chat` endpoint.
+- If the automatic frame-description endpoint is not reachable, verify `--vision-base-url` or `VIDEO_SUMMARY_VISION_BASE_URL`.
+- The bundled client uses an OpenAI-compatible `/v1/chat/completions` vision request shape.
+- If your provider requires authentication, set `--vision-api-key` or `VIDEO_SUMMARY_VISION_API_KEY`.
 - The vision model can be different from your main chat model.
 - For a quick local check before a visual run:
-  use `python scripts/check_env.py`, then verify your vision model and host settings separately.
+  use `python scripts/check_env.py`, then verify your vision model and API settings separately.
 
 ## Temp files
 
